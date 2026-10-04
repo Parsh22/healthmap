@@ -130,7 +130,9 @@ def csrf_protect():
 def inject_globals():
     if "csrf" not in session:
         session["csrf"] = secrets.token_hex(16)
-    return {"csrf_token": session["csrf"], "user_email": session.get("email"), "current_year": datetime.now().year}
+    css_version = int(os.path.getmtime(os.path.join(app.static_folder, "style.css")))
+    return {"csrf_token": session["csrf"], "user_email": session.get("email"), "current_year": datetime.now().year,
+            "css_version": css_version}
 
 
 def login_required(view):
