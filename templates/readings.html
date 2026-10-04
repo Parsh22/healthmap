@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block title %}Readings{% endblock %}
+{% block content %}
+<div class="grid two">
+  <section class="card">
+    <h2>Add a reading</h2>
+    <form method="post" class="stack">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <label>Time <input type="datetime-local" name="ts" class="now" required></label>
+      <label>Glucose (mg/dL) <input type="number" name="value" min="20" max="600" step="1" required></label>
+      <label>Note <input type="text" name="note" maxlength="200" placeholder="optional — e.g. after lunch"></label>
+      <button class="primary">Save</button>
+    </form>
+  </section>
+  <section class="card">
+    <h2>Log a meal, activity, or insulin</h2>
+    <form method="post" action="{{ url_for('add_event') }}" class="stack">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <label>Time <input type="datetime-local" name="ts" class="now" required></label>
+      <div class="kind-picker">
+        {% for k in kinds %}
+        <label class="chip"><input type="radio" name="kind" value="{{ k }}" {{ 'checked' if loop.first }}>
+          <span>{{ {'meal': 'Meal', 'exercise': 'Activity', 'insulin': 'Insulin', 'other': 'Other'}[k] }}</span></label>
+        {% endfor %}
+      </div>
+      <label>What was it? <input type="text" name="note" maxlength="100" placeholder="e.g. pasta, 20 min walk, 4u rapid"></label>
+      <button class="primary">Log event</button>
+    </form>
+    <p class="muted small">Use the same short name each time (“pasta”, not “pasta w/ sauce”) so Insights can compare how each one affects you.</p>
+  </section>
+</div>
+
+<div class="grid two">
+  <section class="card">
+    <h2>Import CSV</h2>
+    <p class="muted small">Works with Dexcom Clarity and FreeStyle Libre exports, or any CSV with a
+      <code>timestamp</code> column and a <code>glucose</code> column (mg/dL; mmol/L is converted if the header says so).</p>
+    <form method="post" action="{{ url_for('import_csv') }}" enctype="multipart/form-data" class="stack">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <input type="file" name="file" accept=".csv,text/csv" required>
+      <button>Import</button>
+    </form>
+    <hr>
+    <div class="row">
+      <a class="button" href="{{ url_for('export_csv') }}">Export my data</a>
+      <form method="post" action="{{ url_for('load_sample') }}" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf_token }}">
+        <button>Load sample data</button>
+      </form>
+    </div>
+  </section>
+  <section class="card">
+    <h2>Recent events</h2>
+    {% if events %}
+    <div class="table-wrap short">
+    <table>
+      <tbody>
+      {% for e in events %}
+        <tr>
+          <td>{{ e.ts[:16] }}</td>
+          <td><span class="tag {{ e.kind }}">{{ e.kind }}</span></td>
+          <td>{{ e.note or '' }}</td>
+          <td>
+            <form method="post" action="{{ url_for('delete_event', eid=e.id) }}" class="inline">
+              <input type="hidden" name="csrf" value="{{ csrf_token }}">
+              <button class="link danger" title="Delete">✕</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    <p class="muted">No events yet. Logging meals unlocks food-by-food insights.</p>
+    {% endif %}
+  </section>
+</div>
+
+<section class="card">
+  <h2>Recent readings <span class="muted small">({{ total }} total{% if total > rows|length %}, showing latest {{ rows|length }}{% endif %})</span></h2>
+  {% if rows %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Time</th><th>mg/dL</th><th>Note</th><th>Source</th><th></th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td>{{ r.ts[:16] }}</td>
+        <td class="{{ 'low' if r.value < 70 else 'high' if r.value > 180 else 'ok' }}">{{ r.value|round|int }}</td>
+        <td>{{ r.note or '' }}</td>
+        <td class="muted">{{ r.source }}</td>
+        <td>
+          <form method="post" action="{{ url_for('delete_reading', rid=r.id) }}" class="inline">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}">
+            <button class="link danger" title="Delete">✕</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  <p class="muted">No readings yet.</p>
+  {% endif %}
+</section>
+
+<section class="card danger-zone">
+  <h2>Danger zone</h2>
+  <div class="row">
+    <form method="post" action="{{ url_for('delete_all_readings') }}" class="inline"
+          onsubmit="return confirm('Delete ALL your readings and events? This cannot be undone.')">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <button class="danger">Delete all readings &amp; events</button>
+    </form>
+    <form method="post" action="{{ url_for('delete_account') }}" class="inline row"
+          onsubmit="return confirm('Permanently delete your account and all data?')">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <input type="password" name="password" placeholder="Confirm password" required>
+      <button class="danger">Delete account</button>
+    </form>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script>
+  const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  document.querySelectorAll('input.now').forEach(i => i.value = d.toISOString().slice(0, 16));
+</script>
+{% endblock %}

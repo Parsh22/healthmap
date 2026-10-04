@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Insights{% endblock %}
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+{% endblock %}
+{% block content %}
+<div class="dash-head">
+  <div>
+    <h1>Insights</h1>
+    <p class="muted">Suggestions based on your last {{ period_days }} days of readings and logged events.</p>
+  </div>
+</div>
+
+{% if not recs %}
+<section class="card empty">
+  <p class="muted">No data yet. <a href="{{ url_for('readings') }}">Add readings</a> to get personalized suggestions.</p>
+</section>
+{% else %}
+<div class="recs">
+  {% for r in recs %}
+  <article class="rec {{ r.level }}">
+    <div class="rec-badge">{{ {'warn': 'Worth a look', 'info': 'Good to know', 'good': 'Going well'}[r.level] }}</div>
+    <h3>{{ r.title }}</h3>
+    <p>{{ r.body }}</p>
+  </article>
+  {% endfor %}
+</div>
+
+<div class="grid two">
+  <section class="card">
+    <h2>How foods &amp; activities affect you</h2>
+    {% if groups %}
+    <div class="table-wrap short">
+    <table>
+      <thead><tr><th>Event</th><th>Times</th><th>Peak change</th><th>Peaks after</th><th>After 2h</th></tr></thead>
+      <tbody>
+      {% for g in groups %}
+        <tr>
+          <td><span class="tag {{ g.kind }}">{{ g.kind }}</span> {{ g.label }}</td>
+          <td>{{ g.n }}</td>
+          {% if g.kind == 'exercise' %}
+          <td class="ok">−{{ g.drop }}</td>
+          {% else %}
+          <td class="{{ 'high' if g.rise >= 60 else 'ok' if g.rise < 40 else '' }}">+{{ g.rise }}</td>
+          {% endif %}
+          <td>{{ g.peak_min }} min</td>
+          <td>{{ '%+d'|format(g.change_2h) if g.change_2h is not none else '—' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    <p class="muted small">Compared with your glucose at the moment you logged the event. Requires frequent readings
+      (e.g. CGM) during the 3 hours afterwards. Other things happening at the same time also affect these numbers.</p>
+    {% else %}
+    <p class="muted">Log meals and activities on the <a href="{{ url_for('readings') }}">Log</a> page. With CGM data, each one gets
+      its own row here showing how much it moves your glucose.</p>
+    {% endif %}
+  </section>
+  <section class="card">
+    <h2>Time in range by weekday</h2>
+    <div class="chart"><canvas id="weekdayChart"></canvas></div>
+  </section>
+</div>
+
+<p class="warn">These are patterns in your data, not medical advice. Talk to your care team before changing medication, insulin, or diet.</p>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if recs %}
+<script>
+const wd = {{ weekday|tojson }};
+new Chart(document.getElementById('weekdayChart'), {
+  type: 'bar',
+  data: { labels: wd.map(d => d.day), datasets: [{ label: 'Time in range', data: wd.map(d => d.tir),
+    backgroundColor: wd.map(d => d.tir === null ? '#e2e8f0' : d.tir >= 70 ? '#16a34a' : d.tir >= 50 ? '#f59e0b' : '#dc2626'),
+    borderRadius: 6 }] },
+  options: { maintainAspectRatio: false, plugins: { legend: { display: false },
+    tooltip: { callbacks: { label: c => `${c.parsed.y}% in range · avg ${wd[c.dataIndex].mean} mg/dL` } } },
+    scales: { y: { min: 0, max: 100, ticks: { callback: v => v + '%' } } } }
+});
+</script>
+{% endif %}
+{% endblock %}

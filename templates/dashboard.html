@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+{% endblock %}
+{% block content %}
+{% if empty %}
+<section class="card empty">
+  <h1>No readings yet</h1>
+  <p class="muted">Add readings manually, import a CGM export, or explore with simulated data.</p>
+  <div class="row center">
+    <a class="button primary" href="{{ url_for('readings') }}">Add or import readings</a>
+    <form method="post" action="{{ url_for('load_sample') }}" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <button>Load sample data</button>
+    </form>
+  </div>
+</section>
+{% else %}
+<div class="dash-head">
+  <div>
+    <div class="muted small">Latest reading · {{ last_t.strftime('%b %d, %H:%M') }}</div>
+    <div class="latest {{ 'low' if last_v < 70 else 'high' if last_v > 180 else 'ok' }}">
+      {{ last_v }} <span class="unit">mg/dL</span>
+      {% if trend %}<span class="arrow" title="{{ trend.rate }} mg/dL/min">{{ trend.arrow }}</span>
+      <span class="muted small">{{ trend.label }}</span>{% endif %}
+    </div>
+  </div>
+  <div class="row">
+  <button class="no-print" onclick="window.print()">Print report</button>
+  <div class="periods">
+    {% for d in (7, 14, 30, 90) %}
+      <a href="{{ url_for('dashboard', days=d) }}" class="{{ 'active' if d == days }}">{{ d }}d</a>
+    {% endfor %}
+  </div>
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat"><div class="label">Time in range</div><div class="value">{{ stats.in_range }}%</div><div class="muted small">70–180 mg/dL{% if wow %} · <span class="{{ 'up' if wow.tir >= 0 else 'down' }}">{{ '%+.1f'|format(wow.tir) }} vs last wk</span>{% endif %}</div></div>
+  <div class="stat"><div class="label">Average</div><div class="value">{{ stats.mean }}</div><div class="muted small">± {{ stats.sd }} mg/dL{% if wow %} · <span class="{{ 'up' if wow.mean <= 0 else 'down' }}">{{ '%+d'|format(wow.mean) }} vs last wk</span>{% endif %}</div></div>
+  <div class="stat"><div class="label">GMI (est. A1C)</div><div class="value">{{ stats.gmi }}%</div><div class="muted small">from mean glucose</div></div>
+  <div class="stat"><div class="label">Variability (CV)</div><div class="value">{{ stats.cv }}%</div><div class="muted small">target ≤ 36%</div></div>
+  <div class="stat"><div class="label">Below 70</div><div class="value">{{ (stats.low + stats.very_low)|round(1) }}%</div><div class="muted small">target &lt; 4%</div></div>
+</div>
+
+<section class="card">
+  <div class="card-head">
+    <h2>Last 24 hours + 2-hour forecast</h2>
+    {% if fc.low_risk is not none %}
+    <span class="risk {{ 'high' if fc.low_risk >= 20 else 'mid' if fc.low_risk >= 5 else 'lowrisk' }}"
+          title="Share of past forecasts like this one where glucose actually dropped below 70 within 2 hours">
+      Chance of going below 70 in next 2h: ~{{ fc.low_risk }}%</span>
+    {% endif %}
+  </div>
+  <p class="muted small fc-meta">
+    {% if model %}
+    Model: <b>{{ fc.method }}</b> · typical error {{ model.mae_30 }} mg/dL at 30 min, {{ model.mae_60 }} at 60 min
+    ({{ model.improvement_60 }}% better than “no change”) · <a href="{{ url_for('how_it_works') }}">how this works</a>
+    {% else %}
+    Add a few days of frequent readings to unlock a personalized, backtested forecast.
+    {% endif %}
+  </p>
+  <div class="chart"><canvas id="recentChart"></canvas></div>
+</section>
+
+<div class="grid two">
+  <section class="card">
+    <h2>Daily pattern <span class="muted small">(median, 25–75% and 10–90% bands)</span></h2>
+    <div class="chart"><canvas id="profileChart"></canvas></div>
+  </section>
+  <section class="card">
+    <h2>Time in range by day</h2>
+    <div class="chart"><canvas id="dailyChart"></canvas></div>
+  </section>
+</div>
+
+<section class="card">
+  <div class="card-head">
+    <h2>At a glance</h2>
+    <a class="no-print" href="{{ url_for('insights') }}">See personalized suggestions →</a>
+  </div>
+  <ul class="insights">{% for i in insights %}<li>{{ i }}</li>{% endfor %}</ul>
+</section>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if not empty %}
+<script>
+const data = {{ payload|tojson }};
+const C = { ok: '#16a34a', low: '#dc2626', high: '#f59e0b', line: '#2563eb', fc: '#7c3aed' };
+const targetBand = {
+  id: 'targetBand',
+  beforeDatasetsDraw(chart) {
+    const { ctx, chartArea: a, scales: { y } } = chart;
+    if (!y) return;
+    const top = y.getPixelForValue(180), bottom = y.getPixelForValue(70);
+    ctx.save();
+    ctx.fillStyle = 'rgba(22,163,74,0.08)';
+    ctx.fillRect(a.left, top, a.right - a.left, bottom - top);
+    ctx.restore();
+  }
+};
+const colorFor = v => v < 70 ? C.low : v > 180 ? C.high : C.ok;
+const yAxis = { min: 40, suggestedMax: 300, title: { display: true, text: 'mg/dL' } };
+
+new Chart(document.getElementById('recentChart'), {
+  type: 'line',
+  data: {
+    datasets: [
+      { label: 'Glucose', data: data.recent.map(p => ({ x: p.t, y: p.v })), borderColor: C.line, borderWidth: 2,
+        pointRadius: data.recent.length > 60 ? 0 : 3, pointBackgroundColor: data.recent.map(p => colorFor(p.v)), tension: 0.25 },
+      { label: 'Forecast range', data: data.forecast.map(p => ({ x: p.t, y: p.hi })), borderWidth: 0, pointRadius: 0, fill: '+1',
+        backgroundColor: 'rgba(124,58,237,0.15)' },
+      { label: '_lo', data: data.forecast.map(p => ({ x: p.t, y: p.lo })), borderWidth: 0, pointRadius: 0 },
+      { label: 'Events', type: 'scatter', data: data.events.map(e => ({ x: e.t, y: e.v, note: e.note, kind: e.kind })),
+        pointStyle: data.events.map(e => ({ meal: 'triangle', exercise: 'rectRot', insulin: 'star' })[e.kind] || 'circle'),
+        pointRadius: 8, pointHoverRadius: 10, borderColor: '#0f172a', borderWidth: 1.5,
+        backgroundColor: data.events.map(e => ({ meal: '#fb923c', exercise: '#22d3ee', insulin: '#a78bfa' })[e.kind] || '#cbd5e1') },
+      { label: 'Forecast', data: [data.recent.at(-1)].map(p => ({ x: p.t, y: p.v })).concat(data.forecast.map(p => ({ x: p.t, y: p.v }))),
+        borderColor: C.fc, borderDash: [6, 4], borderWidth: 2, pointRadius: 0, tension: 0.25 },
+    ]
+  },
+  options: {
+    maintainAspectRatio: false, interaction: { mode: 'nearest', intersect: false },
+    scales: { x: { type: 'time', time: { tooltipFormat: 'MMM d, HH:mm' } }, y: yAxis },
+    plugins: {
+      legend: { labels: { filter: i => !i.text.startsWith('_') } },
+      tooltip: { callbacks: { label: c => c.raw.note ? `${c.raw.kind}: ${c.raw.note}` : `${c.dataset.label}: ${c.parsed.y} mg/dL` } }
+    }
+  },
+  plugins: [targetBand]
+});
+
+const prof = data.profile;
+const pd = k => prof.map(p => ({ x: p.hour + 0.5, y: p[k] }));
+new Chart(document.getElementById('profileChart'), {
+  type: 'line',
+  data: {
+    datasets: [
+      { label: '90th', data: pd('p90'), borderWidth: 0, pointRadius: 0, fill: '+4', backgroundColor: 'rgba(37,99,235,0.08)', spanGaps: true },
+      { label: '75th', data: pd('p75'), borderWidth: 0, pointRadius: 0, fill: '+2', backgroundColor: 'rgba(37,99,235,0.18)', spanGaps: true },
+      { label: 'Median', data: pd('p50'), borderColor: C.line, borderWidth: 2.5, pointRadius: 0, tension: 0.35, spanGaps: true },
+      { label: '25th', data: pd('p25'), borderWidth: 0, pointRadius: 0, spanGaps: true },
+      { label: '10th', data: pd('p10'), borderWidth: 0, pointRadius: 0, spanGaps: true },
+    ]
+  },
+  options: {
+    maintainAspectRatio: false,
+    scales: {
+      x: { type: 'linear', min: 0, max: 24, ticks: { stepSize: 3, callback: v => `${String(v).padStart(2, '0')}:00` } },
+      y: yAxis
+    },
+    plugins: { legend: { display: false }, tooltip: { callbacks: { title: i => `${Math.floor(i[0].parsed.x)}:00` } } }
+  },
+  plugins: [targetBand]
+});
+
+const daily = data.daily;
+const seg = (label, key, color) => ({ label, data: daily.map(d => d[key]), backgroundColor: color });
+new Chart(document.getElementById('dailyChart'), {
+  type: 'bar',
+  data: {
+    labels: daily.map(d => d.date.slice(5)),
+    datasets: [
+      seg('<54', 'very_low', '#991b1b'), seg('54–69', 'low', C.low), seg('70–180', 'in_range', C.ok),
+      seg('181–250', 'high', C.high), seg('>250', 'very_high', '#b45309'),
+    ]
+  },
+  options: {
+    maintainAspectRatio: false,
+    scales: { x: { stacked: true }, y: { stacked: true, max: 100, ticks: { callback: v => v + '%' } } },
+    plugins: { tooltip: { callbacks: { label: c => `${c.dataset.label}: ${c.parsed.y}%` } } }
+  }
+});
+</script>
+{% endif %}
+{% endblock %}

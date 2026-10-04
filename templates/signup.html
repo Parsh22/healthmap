@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Sign up{% endblock %}
+{% block content %}
+<div class="auth card">
+  <h1>Create your account</h1>
+  <p class="muted">Your readings are private to your account.</p>
+  <form method="post">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}">
+    <label>Email <input type="email" name="email" required autofocus></label>
+    <label>Password <input type="password" name="password" minlength="8" required></label>
+    {% if invite_required %}
+    <label>Invite code <input type="text" name="invite" required></label>
+    {% endif %}
+    <button class="primary">Sign up</button>
+  </form>
+  <p class="muted small">Already have an account? <a href="{{ url_for('login') }}">Log in</a></p>
+</div>
+{% endblock %}

@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% block title %}How it works{% endblock %}
+{% block content %}
+<div class="prose">
+<section class="card hero">
+  <h1>How HealthMap works</h1>
+  <p class="muted">From raw readings to a 2-hour forecast and personal suggestions, here is every step, including the math and its limits.</p>
+  <ol class="steps">
+    <li><b>Collect</b> readings, meals, activity</li>
+    <li><b>Align</b> on a 15-minute grid</li>
+    <li><b>Summarize</b> with clinical metrics</li>
+    <li><b>Compete</b> several forecast models</li>
+    <li><b>Explain</b> patterns as suggestions</li>
+  </ol>
+</section>
+
+{% if model %}
+<section class="card callout">
+  <h2>Your forecast right now: <span class="accent">{{ model.method_name }}</span></h2>
+  <p class="muted small">Every model below was scored on the most recent 20% of your data ({{ model.n_test }} forecasts) that none of them saw while learning.
+    Lower is better. The winner was picked on a separate earlier slice, so this scoreboard isn't rigged in its favor.</p>
+  <table class="scores">
+    <thead><tr><th>Method</th><th>Avg error @30 min</th><th>@60 min</th><th>@120 min</th><th>RMSE @30 / @60</th></tr></thead>
+    <tbody>
+    {% for c in model.comparison %}
+      <tr class="{{ 'chosen' if c.key == model.method }}">
+        <td>{{ c.name }}{% if c.key == model.method %} <span class="tag meal">in use</span>{% endif %}</td>
+        <td>{{ c.mae_30 }}</td><td>{{ c.mae_60 }}</td><td>{{ c.mae_120 }}</td><td>{{ c.rmse_30 }} / {{ c.rmse_60 }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted small">All errors in mg/dL. For context, published research models on real CGM data (OhioT1DM dataset) report RMSE of
+    roughly 18–20 mg/dL at 30 minutes and 30–35 at 60 minutes.</p>
+</section>
+{% elif user_email %}
+<section class="card callout">
+  <p class="muted">Once you have a few days of frequent readings (≈100+ spanning 2+ days), this page will show how each forecasting method performs on <em>your</em> data.</p>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>1. Cleaning and aligning the data</h2>
+  <p>CGMs report every 5 minutes, fingersticks a few times a day, and exports often have gaps. Readings are <b>linearly interpolated onto a
+    15-minute grid</b>. If two readings are more than 60 minutes apart, the gap is left empty rather than invented. Values are stored in mg/dL.
+    CSVs labelled mmol/L are multiplied by 18, and CGM “Low”/“High” markers become 40 and 400.</p>
+</section>
+
+<section class="card">
+  <h2>2. The dashboard metrics</h2>
+  <table class="defs">
+    <tr><th>Time in range</th><td>Share of readings between 70 and 180 mg/dL. International consensus target: <b>above 70%</b>.</td></tr>
+    <tr><th>Below range</th><td>Share under 70 mg/dL (under 54 is “very low”). Target: <b>under 4%</b>.</td></tr>
+    <tr><th>GMI</th><td>Glucose Management Indicator, an A1C estimate from mean glucose: <code>GMI (%) = 3.31 + 0.02392 × mean (mg/dL)</code>.</td></tr>
+    <tr><th>CV</th><td>Coefficient of variation = standard deviation ÷ mean. Above <b>36%</b> signals unstable glucose and higher hypo risk.</td></tr>
+    <tr><th>Daily pattern</th><td>Readings grouped by hour of day: median plus 25–75th and 10–90th percentile bands, in the style of the Ambulatory Glucose Profile (AGP).</td></tr>
+    <tr><th>Trend arrow</th><td>Rate of change over the last 15 minutes in mg/dL per minute, using the same thresholds as CGM apps.</td></tr>
+  </table>
+</section>
+
+<section class="card">
+  <h2>3. The forecast: four models compete</h2>
+  <p>No single model is best for everyone, so HealthMap fits several and lets <b>your own history decide</b>.</p>
+
+  <h3>A. Personal regression (ARX-style ridge regression)</h3>
+  <p>A separate linear model for each horizon (15, 30, … 120 minutes) predicts <em>how much glucose will change</em> from:</p>
+  <ul>
+    <li><b>Recent momentum:</b> change over the last 15, 30 and 60 minutes.</li>
+    <li><b>Time of day:</b> encoded as sin/cos so 11:59 PM and 12:01 AM are neighbors.</li>
+    <li><b>Daily rhythm:</b> how far you are from your usual level for the target time.</li>
+    <li><b>Logged events:</b> each meal, activity, or insulin dose is passed through an <em>action curve</em> (rises, peaks around 60–75 minutes, fades)
+      of the same family as the “carbs on board” and “insulin on board” curves used in insulin pumps. The model learns how strongly each type moves <em>your</em> glucose.</li>
+  </ul>
+  <pre class="math">Δglucose(t → t+h) = w₀ + w₁·Δ15 + w₂·Δ30 + w₃·Δ60 + w₄·sin(tod) + w₅·cos(tod)
+                  + w₆·meal_effect(h) + w₇·activity_effect(h) + w₈·insulin_effect(h)
+                  + w₉·(typical(t+h) − now)</pre>
+  <p>Weights are fit by <b>ridge regression</b>, which is least squares with a small penalty that keeps the model from over-reacting to noise when data is limited.
+    This family (autoregressive models with exogenous inputs, “ARX”) is one of the most studied approaches in glucose-prediction research and the
+    standard baseline that fancier models are compared against.</p>
+
+  <h3>B. Smoothing + daily rhythm (damped-trend Holt)</h3>
+  <pre class="math">ℓₜ = α·yₜ + (1 − α)·(ℓₜ₋₁ + φ·bₜ₋₁)          level
+bₜ = β·(ℓₜ − ℓₜ₋₁) + (1 − β)·φ·bₜ₋₁         trend (φ &lt; 1 makes it fade)
+forecast(h) = w·[ℓ + (φ + … + φʰ)·b] + (1 − w)·typical(t+h),   w = e^(−h/τ)</pre>
+  <p>Damped-trend smoothing is a long-established general forecasting method. The blend toward your daily rhythm is HealthMap's own addition.
+    α, β, φ and τ are chosen from 108 combinations by grid search on your data.</p>
+
+  <h3>C. Ensemble</h3>
+  <p>The average of A and B. Averaging different models is one of the most reliable findings in forecasting research, because their errors partly cancel.</p>
+
+  <h3>D. “No change” baseline</h3>
+  <p>Assumes glucose stays where it is. If a model can't beat this, it isn't adding anything. It's shown on the scoreboard for honesty.</p>
+
+  <h3>How the winner is chosen</h3>
+  <p>Your last 30 days are split in time order: models learn on the <b>first 60%</b>, the winner is picked on the <b>next 20%</b>, and every model is
+    scored on the <b>final 20%</b>. Splitting by time (never shuffling) matters, because otherwise a model could “peek” at the future. The chosen model is
+    then refit on all your data for live forecasts.</p>
+
+  <h3>The shaded range and low-risk estimate</h3>
+  <p>The purple band is the <b>10th–90th percentile of past forecast errors</b> at each horizon, so roughly 8 times in 10 the real value landed inside it.
+    The “chance of going below 70” is the share of past forecasts whose actual outcome, applied to today's forecast, would have dipped under 70 within 2 hours.</p>
+</section>
+
+<section class="card">
+  <h2>4. Insights &amp; suggestions</h2>
+  <p>The Insights tab runs a set of transparent rules over your last 14 days: time in range vs target, week-over-week change, overnight lows,
+    early-morning rises, the 3-hour window with the most highs, weekday vs weekend differences, and variability. For logged meals and activities,
+    it measures the <b>peak change within 3 hours</b> and the change at 2 hours, then groups them by name so you can compare “oatmeal” with “cereal”.
+    Suggestions are phrased as things to try or to discuss with your care team, never as instructions.</p>
+</section>
+
+<section class="card">
+  <h2>5. How well-tested is this?</h2>
+  <ul>
+    <li><b>The building blocks are established.</b> ARX/regression models, exponential smoothing, forecast ensembles, time-ordered validation, and AGP-style metrics are all standard.</li>
+    <li><b>This exact combination hasn't been clinically validated.</b> It was developed and checked against <em>simulated</em> CGM data, where it
+      consistently beats the no-change baseline by about 25–40% at 60 minutes. Real data is noisier, so expect larger errors.</li>
+    <li><b>Your scoreboard is the real test.</b> The numbers above are measured on your own held-out data, not on the simulator.</li>
+    <li><b>What would be better still:</b> validation on a public research dataset (e.g. OhioT1DM), and physiological models that use meal carbohydrate
+      amounts and insulin doses directly. Those need data most people don't log.</li>
+  </ul>
+</section>
+
+<section class="card">
+  <h2>6. Limitations</h2>
+  <ul>
+    <li>Unlogged meals, stress, illness, and hormones are invisible to the model and are the biggest sources of error.</li>
+    <li>Sparse fingerstick data can't support momentum, so forecasts fall back mostly to your daily pattern.</li>
+    <li>Meal response numbers are associations: a walk after dinner, or a correction dose, changes what follows.</li>
+    <li>CGM sensors themselves have ~9–10% error and lag blood glucose by 5–15 minutes.</li>
+  </ul>
+  <p class="warn">HealthMap is a learning and visualization tool, not a medical device. Never dose insulin or treat a low based on a forecast. Confirm with your meter and follow your care team's plan.</p>
+</section>
+</div>
+{% endblock %}

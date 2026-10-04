@@ -1,0 +1,6 @@
+.venv
+data/
+__pycache__/
+*.pyc
+healthmap.zip
+.DS_Store
